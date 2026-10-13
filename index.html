@@ -99,7 +99,7 @@
   var state = { mode: "search", value: "", valid: false };
   var session = newToken();
   var useTypes = true;
-  var timer = null, reqId = 0, items = [], active = -1;
+  var timer = null, reqId = 0, items = [], active = -1, picking = false;
 
   function newToken() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -252,12 +252,14 @@
     q.value = stripUSA(p.text.text);
     render([]);
     show(searchMsg, "Checking address\u2026", "hint");
+    picking = true;
     var id = ++reqId;
     api("places/" + encodeURIComponent(p.placeId) + "?sessionToken=" + encodeURIComponent(session) + "&languageCode=en", {
       method: "GET",
       headers: { "X-Goog-FieldMask": "addressComponents,formattedAddress" }
     }).then(function (place) {
       session = newToken();
+      picking = false;
       if (id !== reqId) return;
       var c = parts(place.addressComponents || []);
       if (c.state !== "NC") { setValue("", false); show(searchMsg, NC_ONLY_MSG, "err"); return; }
@@ -268,6 +270,7 @@
       show(searchMsg, "\u2713 North Carolina address confirmed", "ok");
     }).catch(function (e) {
       session = newToken();
+      picking = false;
       if (id !== reqId) return;
       setValue("", false);
       show(searchMsg, "We couldn't confirm that address. Please try again or enter it manually." + errDetail(e), "err");
@@ -286,7 +289,16 @@
     var lis = list.querySelectorAll("li[role=option]");
     for (var k = 0; k < lis.length; k++) lis[k].classList.toggle("active", k === active);
   });
-  q.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== q) render([]); }, 150); });
+  // When the client leaves the box without picking from the list, tell them right away.
+  q.addEventListener("blur", function () {
+    setTimeout(function () {
+      if (document.activeElement === q) return;
+      render([]);
+      if (state.mode === "search" && !state.valid && !picking && q.value.trim()) {
+        show(searchMsg, "Please choose the address from the list, or enter it manually.", "err");
+      }
+    }, 150);
+  });
 
   // ---------- Manual mode ----------
   function validateManual(onSubmit) {
