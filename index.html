@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NC Address Widget</title>
+<script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; font-size: 16px; color: #2c3345; }
+  #wrap { padding: 2px 2px 8px; max-width: 640px; }
+  input[type=text] { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid #b8bdc9; border-radius: 4px; background: #fff; color: inherit; }
+  input[type=text]:focus { outline: none; border-color: #2e69ff; box-shadow: 0 0 0 3px rgba(46,105,255,.2); }
+  input[readonly] { background: #f1f3f6; color: #6f7687; }
+  .list { list-style: none; margin: 4px 0 0; padding: 0; border: 1px solid #d7dbe3; border-radius: 4px; background: #fff; overflow: hidden; }
+  .list li { padding: 9px 12px; cursor: pointer; border-top: 1px solid #eef0f4; line-height: 1.3; }
+  .list li:first-child { border-top: none; }
+  .list li.active, .list li[role=option]:hover { background: #eef3ff; }
+  .list li.attrib { padding: 5px 12px; font-size: 11px; color: #8a90a0; text-align: right; cursor: default; background: #fafbfc; }
+  .main { font-weight: 600; }
+  .sec { color: #6f7687; font-size: 14px; }
+  .msg { margin-top: 6px; font-size: 14px; line-height: 1.4; }
+  .err { color: #c0392b; }
+  .ok { color: #2a7a3b; }
+  .hint { color: #6f7687; }
+  .link { display: inline-block; background: none; border: none; padding: 0; margin-top: 8px; font: inherit; font-size: 14px; color: #2e69ff; text-decoration: underline; cursor: pointer; }
+  .row { display: flex; gap: 8px; }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .narrow { flex: 0 0 84px; }
+  label.f { display: block; font-size: 13px; color: #6f7687; margin: 8px 0 3px; }
+  #test { margin-top: 14px; padding: 10px; border: 1px dashed #b8bdc9; border-radius: 4px; font-size: 13px; background: #fff; white-space: pre-line; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+
+  <!-- Search mode: NC-only suggestions -->
+  <div id="searchMode">
+    <input id="q" type="text" placeholder="Start typing the property address" autocomplete="off" spellcheck="false" aria-autocomplete="list" aria-controls="list">
+    <ul id="list" class="list" role="listbox" hidden></ul>
+    <div id="searchMsg" class="msg" hidden></div>
+    <button id="toManual" class="link" type="button">Can't find the address? Enter it manually</button>
+  </div>
+
+  <!-- Manual mode: for new construction not yet in Google's data -->
+  <div id="manualMode" hidden>
+    <label class="f" for="mStreet">Street address</label>
+    <input id="mStreet" type="text" autocomplete="off" placeholder="e.g., 123 Main St or Lot 12 Oak Ridge Dr">
+    <div class="row">
+      <div class="grow">
+        <label class="f" for="mCity">City</label>
+        <input id="mCity" type="text" autocomplete="off">
+      </div>
+      <div class="narrow">
+        <label class="f" for="mState">State</label>
+        <input id="mState" type="text" value="NC" readonly tabindex="-1">
+      </div>
+      <div class="narrow">
+        <label class="f" for="mZip">ZIP</label>
+        <input id="mZip" type="text" inputmode="numeric" maxlength="5" autocomplete="off">
+      </div>
+    </div>
+    <div id="manualMsg" class="msg" hidden></div>
+    <button id="toSearch" class="link" type="button">Search for the address instead</button>
+  </div>
+
+  <!-- Only shown when the page is opened on its own (not inside Jotform) -->
+  <div id="test" hidden></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ===================== SETTINGS =====================
+  var API_KEY = "AIzaSyC_vi4zJ1VYaMGXB0opLX3EtzAsElX-s9M";
+  var PHONE = "919-627-8244";
+  var MIN_CHARS = 3;        // characters typed before the first search
+  var DEBOUNCE_MS = 250;    // pause after typing before searching
+  // Search is limited to this box around North Carolina; anything outside NC inside the box is dropped below.
+  var NC_BOX = { low: { latitude: 33.75, longitude: -84.40 }, high: { latitude: 36.65, longitude: -75.40 } };
+  var ADDRESS_TYPES = ["street_address", "premise", "subpremise", "route"];
+  // Exact, case-sensitive check that a suggestion ends in NC (no "Lancaster" problem).
+  var NC_TEXT = /,\s(NC|North Carolina)(\s\d{5}(-\d{4})?)?,\s(USA|United States)$/;
+  var NC_ONLY_MSG = "We only inspect homes in North Carolina. Please check the address, or call us at " + PHONE + " if you think this is a mistake.";
+  // ====================================================
+
+  var inJotform = window.self !== window.top;
+  var hasJF = typeof window.JFCustomWidget !== "undefined";
+
+  function el(id) { return document.getElementById(id); }
+  var q = el("q"), list = el("list"), searchMsg = el("searchMsg");
+  var searchMode = el("searchMode"), manualMode = el("manualMode");
+  var mStreet = el("mStreet"), mCity = el("mCity"), mZip = el("mZip"), manualMsg = el("manualMsg");
+  var testBox = el("test");
+
+  var state = { mode: "search", value: "", valid: false };
+  var session = newToken();
+  var useTypes = true;
+  var timer = null, reqId = 0, items = [], active = -1;
+
+  function newToken() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+      var r = Math.random() * 16 | 0;
+      return (c === "x" ? r : (r & 3 | 8)).toString(16);
+    });
+  }
+
+  function resize() {
+    if (!(hasJF && inJotform)) return;
+    try { JFCustomWidget.requestFrameResize({ height: el("wrap").offsetHeight + 10 }); } catch (e) {}
+  }
+
+  function show(node, text, cls) {
+    if (!text) { node.hidden = true; node.textContent = ""; }
+    else { node.hidden = false; node.textContent = text; node.className = "msg " + (cls || "hint"); }
+    resize();
+  }
+
+  function setValue(value, valid) {
+    state.value = value;
+    state.valid = valid;
+    if (hasJF && inJotform) { try { JFCustomWidget.sendData({ value: value }); } catch (e) {} }
+    updateTest();
+  }
+
+  function updateTest() {
+    if (inJotform) return;
+    testBox.hidden = false;
+    testBox.textContent = "TEST MODE (page opened on its own, not inside Jotform)\n" +
+      "Value that would be sent to Jotform: " + (state.value || "(empty)") + "\n" +
+      "Valid: " + (state.valid ? "yes" : "no");
+  }
+
+  function errDetail(e) { return inJotform ? "" : " [" + e.message + "]"; }
+
+  // ---------- Google Places API (New) ----------
+  function api(path, opts) {
+    opts.headers = Object.assign({ "X-Goog-Api-Key": API_KEY }, opts.headers || {});
+    return fetch("https://places.googleapis.com/v1/" + path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (body) {
+        if (!r.ok) {
+          var e = new Error((body.error && body.error.message) || ("HTTP " + r.status));
+          e.status = r.status;
+          throw e;
+        }
+        return body;
+      });
+    });
+  }
+
+  function search(text) {
+    var body = {
+      input: text,
+      sessionToken: session,
+      includedRegionCodes: ["us"],
+      locationRestriction: { rectangle: NC_BOX },
+      languageCode: "en"
+    };
+    if (useTypes) body.includedPrimaryTypes = ADDRESS_TYPES;
+    return api("places:autocomplete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).catch(function (e) {
+      // If Google rejects the address-type filter, retry without it and filter here instead.
+      if (useTypes && e.status === 400 && /type/i.test(e.message)) { useTypes = false; return search(text); }
+      throw e;
+    });
+  }
+
+  function isAddressLike(p) {
+    var t = p.types || [];
+    if (!t.length) return true;
+    return t.some(function (x) { return ADDRESS_TYPES.indexOf(x) !== -1; });
+  }
+
+  function stripUSA(s) { return (s || "").replace(/,\s(USA|United States)$/, ""); }
+
+  // ---------- Search mode ----------
+  function onInput() {
+    var text = q.value.trim();
+    setValue("", false);
+    show(searchMsg, "");
+    clearTimeout(timer);
+    if (text.length < MIN_CHARS) { reqId++; render([]); return; }
+    timer = setTimeout(function () { run(text); }, DEBOUNCE_MS);
+  }
+
+  function run(text) {
+    var id = ++reqId;
+    search(text).then(function (res) {
+      if (id !== reqId) return;
+      var preds = (res.suggestions || []).map(function (s) { return s.placePrediction; }).filter(Boolean);
+      var nc = preds.filter(function (p) { return NC_TEXT.test((p.text && p.text.text) || ""); });
+      if (!useTypes) nc = nc.filter(isAddressLike);
+      render(nc);
+      if (!nc.length) show(searchMsg, "No matching North Carolina addresses yet. Keep typing, or enter the address manually.", "hint");
+    }).catch(function (e) {
+      if (id !== reqId) return;
+      render([]);
+      show(searchMsg, "Address lookup isn't available right now. Please enter the address manually." + errDetail(e), "err");
+      console.error("Places autocomplete error:", e);
+    });
+  }
+
+  function render(preds) {
+    items = preds;
+    active = -1;
+    list.innerHTML = "";
+    if (!preds.length) { list.hidden = true; resize(); return; }
+    preds.forEach(function (p, i) {
+      var sf = p.structuredFormat || {};
+      var li = document.createElement("li");
+      li.setAttribute("role", "option");
+      var main = document.createElement("div");
+      main.className = "main";
+      main.textContent = (sf.mainText && sf.mainText.text) || stripUSA(p.text.text);
+      var sec = document.createElement("div");
+      sec.className = "sec";
+      sec.textContent = stripUSA(sf.secondaryText && sf.secondaryText.text);
+      li.appendChild(main);
+      li.appendChild(sec);
+      li.addEventListener("mousedown", function (ev) { ev.preventDefault(); pick(i); });
+      list.appendChild(li);
+    });
+    var a = document.createElement("li");
+    a.className = "attrib";
+    a.textContent = "Powered by Google Maps";
+    a.addEventListener("mousedown", function (ev) { ev.preventDefault(); });
+    list.appendChild(a);
+    list.hidden = false;
+    resize();
+  }
+
+  function parts(comps) {
+    var out = {};
+    comps.forEach(function (c) {
+      var t = c.types || [];
+      if (t.indexOf("administrative_area_level_1") !== -1) out.state = c.shortText;
+      if (t.indexOf("street_number") !== -1) out.number = c.longText;
+    });
+    return out;
+  }
+
+  function pick(i) {
+    var p = items[i];
+    if (!p) return;
+    q.value = stripUSA(p.text.text);
+    render([]);
+    show(searchMsg, "Checking address\u2026", "hint");
+    var id = ++reqId;
+    api("places/" + encodeURIComponent(p.placeId) + "?sessionToken=" + encodeURIComponent(session) + "&languageCode=en", {
+      method: "GET",
+      headers: { "X-Goog-FieldMask": "addressComponents,formattedAddress" }
+    }).then(function (place) {
+      session = newToken();
+      if (id !== reqId) return;
+      var c = parts(place.addressComponents || []);
+      if (c.state !== "NC") { setValue("", false); show(searchMsg, NC_ONLY_MSG, "err"); return; }
+      if (!c.number) { setValue("", false); show(searchMsg, "Please choose an address that includes a house number, or enter it manually.", "err"); return; }
+      var line = stripUSA(place.formattedAddress || q.value);
+      q.value = line;
+      setValue(line, true);
+      show(searchMsg, "\u2713 North Carolina address confirmed", "ok");
+    }).catch(function (e) {
+      session = newToken();
+      if (id !== reqId) return;
+      setValue("", false);
+      show(searchMsg, "We couldn't confirm that address. Please try again or enter it manually." + errDetail(e), "err");
+      console.error("Place details error:", e);
+    });
+  }
+
+  q.addEventListener("input", onInput);
+  q.addEventListener("keydown", function (e) {
+    if (list.hidden || !items.length) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active + 1, items.length - 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active - 1, 0); }
+    else if (e.key === "Enter") { if (active >= 0) { e.preventDefault(); pick(active); } return; }
+    else if (e.key === "Escape") { render([]); return; }
+    else return;
+    var lis = list.querySelectorAll("li[role=option]");
+    for (var k = 0; k < lis.length; k++) lis[k].classList.toggle("active", k === active);
+  });
+  q.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== q) render([]); }, 150); });
+
+  // ---------- Manual mode ----------
+  function validateManual(onSubmit) {
+    var street = mStreet.value.trim(), city = mCity.value.trim(), zip = mZip.value.trim();
+    var problem = "";
+    if (/^\d{5}$/.test(zip) && !/^2[78]/.test(zip)) problem = "That ZIP code isn't in North Carolina. " + NC_ONLY_MSG;
+    else if (onSubmit && (!street || !city || !zip)) problem = "Please fill in the street, city, and ZIP code.";
+    else if (onSubmit && !/^\d{5}$/.test(zip)) problem = "Please enter a 5-digit ZIP code.";
+    var ok = !!(street && city && /^2[78]\d{3}$/.test(zip));
+    show(manualMsg, problem, "err");
+    setValue(ok ? street + ", " + city + ", NC " + zip + " (entered manually)" : "", ok);
+    return ok;
+  }
+
+  [mStreet, mCity, mZip].forEach(function (inp) {
+    inp.addEventListener("input", function () { validateManual(false); });
+  });
+
+  el("toManual").addEventListener("click", function () {
+    state.mode = "manual";
+    reqId++;
+    render([]);
+    show(searchMsg, "");
+    searchMode.hidden = true;
+    manualMode.hidden = false;
+    validateManual(false);
+    mStreet.focus();
+    resize();
+  });
+
+  el("toSearch").addEventListener("click", function () {
+    state.mode = "search";
+    manualMode.hidden = true;
+    searchMode.hidden = false;
+    show(manualMsg, "");
+    q.value = "";
+    setValue("", false);
+    q.focus();
+    resize();
+  });
+
+  // ---------- Jotform connection ----------
+  function onSubmit() {
+    if (state.mode === "manual") validateManual(true);
+    else if (!state.valid) {
+      show(searchMsg, q.value.trim() ? "Please choose the address from the list, or enter it manually." : "Please enter the property address.", "err");
+    }
+    JFCustomWidget.sendSubmit({ valid: state.valid, value: state.value });
+  }
+
+  if (hasJF) {
+    try {
+      JFCustomWidget.subscribe("ready", function (data) {
+        if (data && data.value) { q.value = data.value; state.value = data.value; state.valid = true; }
+        JFCustomWidget.subscribe("submit", onSubmit);
+        resize();
+      });
+    } catch (e) { console.error("Jotform widget connection error:", e); }
+  }
+
+  updateTest();
+})();
+</script>
+</body>
+</html>
