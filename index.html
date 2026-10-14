@@ -295,7 +295,7 @@
       if (document.activeElement === q) return;
       render([]);
       if (state.mode === "search" && !state.valid && !picking && q.value.trim()) {
-        show(searchMsg, "Please choose the address from the list, or enter it manually.", "err");
+        show(searchMsg, "Please choose an address from the list, or enter it manually.", "err");
       }
     }, 150);
   });
@@ -344,7 +344,7 @@
   function onSubmit() {
     if (state.mode === "manual") validateManual(true);
     else if (!state.valid) {
-      show(searchMsg, q.value.trim() ? "Please choose the address from the list, or enter it manually." : "Please enter the property address.", "err");
+      show(searchMsg, q.value.trim() ? "Please choose an address from the list, or enter it manually." : "Please enter the property address.", "err");
     }
     JFCustomWidget.sendSubmit({ valid: state.valid, value: state.value });
   }
